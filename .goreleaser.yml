@@ -1,0 +1,84 @@
+# .goreleaser.yml
+# Build customization
+version: 2
+project_name: ergo
+builds:
+  - main: ergo.go
+    env:
+      - CGO_ENABLED=0
+    binary: ergo
+    goos:
+      - linux
+      - windows
+      - darwin
+      - freebsd
+      - openbsd
+      - plan9
+    goarch:
+      - amd64
+      - arm
+      - arm64
+      - riscv64
+    goarm:
+      - 6
+    ignore:
+      - goos: windows
+        goarch: arm
+      - goos: windows
+        goarch: arm64
+      - goos: windows
+        goarch: riscv64
+      - goos: darwin
+        goarch: arm
+      - goos: darwin
+        goarch: riscv64
+      - goos: freebsd
+        goarch: arm
+      - goos: freebsd
+        goarch: arm64
+      - goos: freebsd
+        goarch: riscv64
+      - goos: openbsd
+        goarch: arm
+      - goos: openbsd
+        goarch: arm64
+      - goos: openbsd
+        goarch: riscv64
+      - goos: plan9
+        goarch: arm
+      - goos: plan9
+        goarch: arm64
+      - goos: plan9
+        goarch: riscv64
+    flags:
+      - -trimpath
+      - -tags={{.Env.ERGO_BUILD_TAGS}}
+
+archives:
+  -
+    name_template: >-
+            {{ .ProjectName }}-{{ .Version }}-
+            {{- if eq .Os "darwin" }}macos{{- else }}{{ .Os }}{{ end -}}-
+            {{- if eq .Arch "amd64" }}x86_64{{- else }}{{ .Arch }}{{ end -}}
+            {{ if .Arm }}v{{ .Arm }}{{ end -}}
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README
+      - CHANGELOG.md
+      - LICENSE
+      - ergo.motd
+      - default.yaml
+      - traditional.yaml
+      - docs/API.md
+      - docs/BUILD.md
+      - docs/MANUAL.md
+      - docs/USERGUIDE.md
+      - languages/*.yaml
+      - languages/*.json
+      - languages/*.md
+    wrap_in_directory: true
+checksum:
+  name_template: "{{ .ProjectName }}-{{ .Version }}-checksums.txt"

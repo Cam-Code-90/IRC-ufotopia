@@ -1,0 +1,237 @@
+         __ __  ______ ___  ______ ___ 
+      __/ // /_/ ____/ __ \/ ____/ __ \
+     /_  // __/ __/ / /_/ / / __/ / / /
+    /_  // __/ /___/ _, _/ /_/ / /_/ / 
+     /_//_/ /_____/_/ |_|\____/\____/  
+
+        Ergo IRCd API Documentation
+            https://ergo.chat/
+
+_Copyright © Daniel Oaks <daniel@danieloaks.net>, Shivaram Lingamneni <slingamn@cs.stanford.edu>_
+
+
+--------------------------------------------------------------------------------------------
+
+Ergo has an experimental HTTP API. Some general information about the API:
+
+1. All requests to the API are via POST.
+1. All requests to the API are authenticated via bearer authentication. This is a header named `Authorization` with the value `Bearer <token>`. A list of valid tokens is hardcoded in the Ergo config. Future versions of Ergo may allow additional validation schemes for tokens.
+1. The request parameters are sent as JSON in the POST body.
+1. Any status code other than 200 is an error response; the response body is undefined in this case (likely human-readable text for debugging).
+1. A 200 status code indicates successful execution of the request. The response body will be JSON and may indicate application-level success or failure (typically via the `success` field, which takes a boolean value).
+
+API endpoints are versioned (currently all endpoints have a `/v1/` path prefix). Backwards-incompatible updates will most likely take the form of endpoints with new names, or an increased version prefix. Any exceptions to this will be specifically documented in the changelog.
+
+All API endpoints should be considered highly privileged. Bearer tokens should be kept secret. Access to the API should be either over a trusted link (like loopback) or secured via verified TLS. See the `api` section of `default.yaml` for examples of how to configure this.
+
+Here's an example of how to test an API configured to run over loopback TCP in plaintext:
+
+```bash
+curl -d '{"accountName": "invalidaccountname", "passphrase": "invalidpassphrase"}' -H 'Authorization: Bearer EYBbXVilnumTtfn4A9HE8_TiKLGWEGylre7FG6gEww0' -v http://127.0.0.1:8089/v1/check_auth
+```
+
+This returns:
+
+```json
+{"success":false}
+```
+
+Endpoints
+=========
+
+`/v1/check_auth`
+----------------
+
+This endpoint verifies the credentials of a NickServ account; this allows Ergo to be used as the source of truth for authentication by another system. The request is a JSON object with fields:
+
+* `accountName`: string, name of the account
+* `passphrase`: string, alleged passphrase of the account
+* `certfp`: string, alleged certificate fingerprint (hex-encoded SHA-256 checksum of the decoded raw certificate) associated with the account
+
+Each individual field is optional, since a user may be authenticated either by account-passphrase pair or by certificate.
+
+The response is a JSON object with fields:
+
+* `success`: whether the credentials provided were valid
+* `accountName`: canonical, case-unfolded version of the account name
+
+`/v1/defcon`
+------------
+
+This endpoint can be used to view or modify the DEFCON level (see `/helpop defcon` for details). If the request is empty, the existing level is returned. To change the level, send a JSON object with fields:
+
+* `defcon`: integer, desired new value of the DEFCON setting (between 5 for normal operation and 1 for the most restrictive)
+
+The response is a JSON object with fields:
+
+* `defcon`: integer, current (or new) value of the DEFCON setting
+
+`/v1/list`
+----------
+
+This endpoint returns a list of channels that exist on the network. The request body is ignored and can be empty.
+
+The response is a JSON object with fields:
+
+* `success`: whether the request was successful
+* `channels`: a list of channel objects, as described below
+
+Each channel object has fields:
+
+* `name`: canonical name of the channel without case-normalization
+* `hasKey`: boolean, whether the channel has a key set with the `+k` mode
+* `inviteOnly`: boolean, whether the channel has the `+i` invite-only mode set
+* `secret`: boolean, whether the channel has the `+s` secret mode set (and would be hidden from an unprivileged `LIST` command)
+* `userCount`: integer, number of users in the channel
+* `topic`: string, channel topic
+* `topicSetAt`: string, time the topic was last updated (in ISO8601 format)
+* `createdAt`: string, time the channel was created (in ISO8601 format)
+* `registered`: boolean, whether the channel is registered
+* `owner`: string, account name of the registered owner if the channel is registered
+* `registeredAt`: string, registration date/time of the channel (in ISO8601 format) if it is registered
+
+
+`/v1/ns/info`
+-------------
+
+This endpoint fetches account details and returns them as JSON. The request is a JSON object with fields:
+
+* `accountName`: string, name of the account
+
+The response is a JSON object with fields:
+
+* `success`: whether the account exists or not
+* `accountName`: canonical, case-unfolded version of the account name
+* `email`: email address of the account provided
+* `registeredAt`: string, registration date/time of the account (in ISO8601 format)
+* `channels`: array of strings, list of channels the account is registered on or associated with
+
+Note: this endpoint was previously named `/v1/account_details`. The old name is still accepted for backwards compatibility.
+
+`/v1/ns/list`
+-------------
+
+This endpoint fetches a list of all accounts. The request body is ignored and can be empty.
+
+The response is a JSON object with fields:
+
+* `success`: whether the request succeeded
+* `accounts`: array of objects, each with fields:
+  * `success`: boolean, whether this individual account query succeeded
+  * `accountName`: string, canonical, case-unfolded version of the account name
+* `totalCount`: integer, total number of accounts returned
+
+Note: this endpoint was previously named `/v1/account_list`. The old name is still accepted for backwards compatibility.
+
+`/v1/ns/passwd`
+---------------
+
+This endpoint changes the password of an existing NickServ account. The request is a JSON object with fields:
+
+* `accountName`: string, name of the account
+* `passphrase`: string, new passphrase for the account
+
+The response is a JSON object with fields:
+
+* `success`: whether the password change succeeded
+* `errorCode`: string, optional, machine-readable description of the error. Possible values include: `ACCOUNT_DOES_NOT_EXIST`, `INVALID_PASSPHRASE`, `CREDENTIALS_EXTERNALLY_MANAGED`, `UNKNOWN_ERROR`.
+
+`/v1/ns/saget`
+--------------
+
+This endpoint retrieves account settings associated with an existing NickServ account. The request is a JSON object with fields:
+
+* `accountName`: string, name of the account
+
+The response is a JSON object with fields:
+
+* `success`: boolean, whether the request succeeded
+* `errorCode`: string, optional, machine-readable description of the error if `success` is false. Possible values: `INVALID_REQUEST`, `ACCOUNT_DOES_NOT_EXIST`, `ACCOUNT_UNVERIFIED`, `UNKNOWN_ERROR`. If `success` is false, the remaining fields are omitted.
+* `error`: string, optional, human-readable description of the failure if `success` is false and `errorCode` is `UNKNOWN_ERROR`
+* `alwaysOn`, string, whether the user is always-on (`default`, `off`, or `on`)
+* `autoAway`, string, whether to automatically set an always-on user as away when no client sessions are connected (`default`, `off`, or `on`)
+* `email`, string, email address associated with the account
+* `replayJoins`, string, whether to replay events like JOIN as PRIVMSGs from HistServ to legacy clients (`commands-only` or `on`)
+
+`/v1/ns/saset`
+--------------
+
+This endpoint modifies account settings associated with an existing NickServ account. The request is a JSON object with fields:
+
+* `accountName`: string, name of the account
+* `alwaysOn`, string, optional, whether the user is always-on (`default`, `off`, or `on`)
+* `autoAway`, string, optional, whether to automatically set an always-on user as away when no client sessions are connected (`default`, `off`, or `on`)
+* `email`, string, optional, email address associated with the account
+* `replayJoins`, string, optional, whether to replay events like JOIN as PRIVMSGs from HistServ to legacy clients (`commands-only` or `on`)
+
+Omitted fields are not updated (i.e. PATCH semantics).
+
+The response format is the same as `/v1/ns/saget`.
+
+`/v1/ns/saregister`
+-------------------
+
+This endpoint registers an account in NickServ, with the same semantics as `NS SAREGISTER`. The request is a JSON object with fields:
+
+* `accountName`: string, name of the account
+* `passphrase`: string, passphrase of the account
+
+The response is a JSON object with fields:
+
+* `success`: whether the account creation succeeded
+* `errorCode`: string, optional, machine-readable description of the error. Possible values include: `ACCOUNT_EXISTS`, `INVALID_PASSPHRASE`, `UNKNOWN_ERROR`.
+* `error`: string, optional, human-readable description of the failure.
+
+Note: this endpoint was previously named `/v1/saregister`. The old name is still accepted for backwards compatibility.
+
+`/v1/rehash`
+------------
+
+This endpoint rehashes the server (i.e. reloads the configuration file, TLS certificates, and other associated data). The body is ignored. The response is a JSON object with fields:
+
+* `success`: boolean, indicates whether the rehash was successful
+* `error`: string, optional, human-readable description of the failure
+
+`/v1/status`
+------------
+
+This endpoint returns status information about the running Ergo server. The request body is ignored and can be empty.
+
+The response is a JSON object with fields:
+
+* `success`: whether the request succeeded
+* `version`: string, Ergo server version string
+* `go_version`: string, version of Go runtime used
+* `start_time`: string, server start time in ISO8601 format
+* `users`: object with fields:
+  * `total`: total number of users connected
+  * `invisible`: number of invisible users
+  * `operators`: number of operators connected
+  * `unknown`: number of users with unknown status
+  * `max`: maximum number of users seen connected at once
+* `channels`: integer, number of channels currently active
+* `servers`: integer, number of servers connected in the network
+
+`/v1/whois`
+-----------
+
+This endpoint returns data about the current status of a nickname on the server. The request is a JSON object with fields:
+
+* `nickname`: string, nickname to query
+
+The response is a JSON object with fields:
+
+* `success`: whether the request succeeded (a successful execution returns `true` here even if the nickname is not present)
+* `present`: whether the nickname is present on the server; if false, the remaining fields are undefined
+* `nickname`: actual nickname (without case normalization) of the nickname as present on the server
+* `username`: IRC protocol username field of the user (not to be confused with account name)
+* `hostname`: hostname of the user
+* `realname`: realname/gecos of the user
+* `account`: account name of the user (without case normalization)
+* `modes`: string of all set user modes
+* `away`: user's away message if set (omitted if they are not away)
+* `channels`: list of channels the user is present in. Each channel is an object with fields:
+  * `name`: name of the channel
+  * `mode`: string, highest mode the user has in the channel (omitted if they have no mode)
+  * `join_time`: string, time the user joined the channel (in ISO8601 format)
+* `session_count`: integer, number of active sessions

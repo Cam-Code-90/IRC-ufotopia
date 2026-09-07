@@ -1,0 +1,426 @@
+// Copyright (c) 2012-2014 Jeremy Latt
+// Copyright (c) 2014-2015 Edmund Huber
+// Copyright (c) 2016-2017 Daniel Oaks <daniel@danieloaks.net>
+// released under the MIT license
+
+package irc
+
+import (
+	"github.com/ergochat/irc-go/ircmsg"
+)
+
+// Command represents a command accepted from a client.
+type Command struct {
+	handler      func(server *Server, client *Client, msg ircmsg.Message, rb *ResponseBuffer) bool
+	usablePreReg bool
+	minParams    int
+	capabs       []string
+}
+
+// resolveCommand returns the command to execute in response to a user input line.
+// some invalid commands (unknown command verb, invalid UTF8) get a fake handler
+// to ensure that labeled-response still works as expected.
+func (server *Server) resolveCommand(command string, invalidUTF8 bool) (canonicalName string, result Command) {
+	if invalidUTF8 {
+		return command, invalidUtf8Command
+	}
+	if cmd, ok := Commands[command]; ok {
+		return command, cmd
+	}
+	if target, ok := server.Config().Server.CommandAliases[command]; ok {
+		if cmd, ok := Commands[target]; ok {
+			return target, cmd
+		}
+	}
+	return command, unknownCommand
+}
+
+// Run runs this command with the given client/message.
+func (cmd *Command) Run(server *Server, client *Client, session *Session, msg ircmsg.Message) (exiting bool) {
+	rb := NewResponseBuffer(session)
+	rb.Label = GetLabel(msg)
+
+	exiting = func() bool {
+		defer rb.Send(true)
+
+		if !client.registered && !cmd.usablePreReg {
+			rb.Add(nil, server.name, ERR_NOTREGISTERED, "*", client.t("You need to register before you can use that command"))
+			return false
+		}
+		if len(cmd.capabs) > 0 && !client.HasRoleCapabs(cmd.capabs...) {
+			rb.Add(nil, server.name, ERR_NOPRIVILEGES, client.Nick(), client.t("Permission Denied"))
+			return false
+		}
+		if len(msg.Params) < cmd.minParams {
+			rb.Add(nil, server.name, ERR_NEEDMOREPARAMS, client.Nick(), msg.Command, rb.target.t("Not enough parameters"))
+			return false
+		}
+		// C2S batch restrictions, custom per C2S batch type:
+		if session.multilineBatch.label != "" && !(msg.Command == "BATCH" || msg.Command == "PRIVMSG" || msg.Command == "NOTICE") {
+			rb.Add(nil, server.name, "FAIL", "BATCH", "MULTILINE_INVALID", client.t("Command not allowed during a multiline batch"))
+			session.EndMultilineBatch("")
+			return false
+		}
+		if session.tokenValidateBatch != nil && !(msg.Command == "BATCH" || msg.Command == "TOKEN") {
+			rb.Add(nil, server.name, "FAIL", "BATCH", "INVALID_PARAMS", client.t("Command not allowed during a TOKEN VALIDATE batch"))
+			session.tokenValidateBatch = nil
+			return false
+		}
+
+		return cmd.handler(server, client, msg, rb)
+	}()
+
+	// after each command, see if we can send registration to the client
+	if !exiting && !client.registered {
+		exiting = server.tryRegister(client, session)
+	}
+
+	if client.registered {
+		client.Touch(session) // even if `exiting`, we bump the lastSeen timestamp
+	}
+
+	return exiting
+}
+
+// fake handler for unknown commands (see #994: this ensures the response tags are correct)
+var unknownCommand = Command{
+	handler:      unknownCommandHandler,
+	usablePreReg: true,
+}
+
+var invalidUtf8Command = Command{
+	handler:      invalidUtf8Handler,
+	usablePreReg: true,
+}
+
+// Commands holds all commands executable by a client connected to us.
+var Commands map[string]Command
+
+func init() {
+	Commands = map[string]Command{
+		"ACCEPT": {
+			handler:   acceptHandler,
+			minParams: 1,
+		},
+		"AMBIANCE": {
+			handler:   sceneHandler,
+			minParams: 2,
+		},
+		"AUTHENTICATE": {
+			handler:      authenticateHandler,
+			usablePreReg: true,
+			minParams:    1,
+		},
+		"AWAY": {
+			handler:      awayHandler,
+			usablePreReg: true,
+			minParams:    0,
+		},
+		"BATCH": {
+			handler:      batchHandler,
+			minParams:    1,
+			usablePreReg: true,
+		},
+		"CAP": {
+			handler:      capHandler,
+			usablePreReg: true,
+			minParams:    1,
+		},
+		"CHATHISTORY": {
+			handler:   chathistoryHandler,
+			minParams: 4,
+		},
+		"DEBUG": {
+			handler:   debugHandler,
+			minParams: 1,
+			capabs:    []string{"rehash"},
+		},
+		"DEFCON": {
+			handler: defconHandler,
+			capabs:  []string{"defcon"},
+		},
+		"DEOPER": {
+			handler:   deoperHandler,
+			minParams: 0,
+		},
+		"DLINE": {
+			handler:   dlineHandler,
+			minParams: 1,
+			capabs:    []string{"ban"},
+		},
+		"EXTJWT": {
+			handler:   extjwtHandler,
+			minParams: 1,
+		},
+		"HELP": {
+			handler:   helpHandler,
+			minParams: 0,
+		},
+		"HELPOP": {
+			handler:   helpHandler,
+			minParams: 0,
+		},
+		"HISTORY": {
+			handler:   historyHandler,
+			minParams: 1,
+		},
+		"INFO": {
+			handler: infoHandler,
+		},
+		"INVITE": {
+			handler:   inviteHandler,
+			minParams: 2,
+		},
+		"ISON": {
+			handler:   isonHandler,
+			minParams: 1,
+		},
+		"ISUPPORT": {
+			handler:      isupportHandler,
+			usablePreReg: true,
+		},
+		"JOIN": {
+			handler:   joinHandler,
+			minParams: 1,
+		},
+		"KICK": {
+			handler:   kickHandler,
+			minParams: 2,
+		},
+		"KILL": {
+			handler:   killHandler,
+			minParams: 1,
+			capabs:    []string{"kill"},
+		},
+		"KLINE": {
+			handler:   klineHandler,
+			minParams: 1,
+			capabs:    []string{"ban"},
+		},
+		"LANGUAGE": {
+			handler:      languageHandler,
+			usablePreReg: true,
+			minParams:    1,
+		},
+		"LIST": {
+			handler:   listHandler,
+			minParams: 0,
+		},
+		"LUSERS": {
+			handler:   lusersHandler,
+			minParams: 0,
+		},
+		"MARKREAD": {
+			handler:   markReadHandler,
+			minParams: 0, // send FAIL instead of ERR_NEEDMOREPARAMS
+		},
+		"METADATA": {
+			handler:      metadataHandler,
+			minParams:    2,
+			usablePreReg: true,
+		},
+		"MODE": {
+			handler:   modeHandler,
+			minParams: 1,
+		},
+		"MONITOR": {
+			handler:   monitorHandler,
+			minParams: 1,
+		},
+		"MOTD": {
+			handler:   motdHandler,
+			minParams: 0,
+		},
+		"NAMES": {
+			handler:   namesHandler,
+			minParams: 0,
+		},
+		"NICK": {
+			handler:      nickHandler,
+			usablePreReg: true,
+			minParams:    1,
+		},
+		"NOTICE": {
+			handler:   messageHandler,
+			minParams: 2,
+		},
+		"NPC": {
+			handler:   npcHandler,
+			minParams: 3,
+		},
+		"NPCA": {
+			handler:   npcaHandler,
+			minParams: 3,
+		},
+		"OPER": {
+			handler:   operHandler,
+			minParams: 1,
+		},
+		"PART": {
+			handler:   partHandler,
+			minParams: 1,
+		},
+		"PASS": {
+			handler:      passHandler,
+			usablePreReg: true,
+			minParams:    1,
+		},
+		"PERSISTENCE": {
+			handler:   persistenceHandler,
+			minParams: 1,
+		},
+		"PING": {
+			handler:      pingHandler,
+			usablePreReg: true,
+			minParams:    1,
+		},
+		"PONG": {
+			handler:      pongHandler,
+			usablePreReg: true,
+			minParams:    1,
+		},
+		"PRIVMSG": {
+			handler:   messageHandler,
+			minParams: 2,
+		},
+		"QUIT": {
+			handler:      quitHandler,
+			usablePreReg: true,
+			minParams:    0,
+		},
+		"REDACT": {
+			handler:   redactHandler,
+			minParams: 2,
+		},
+		"REGISTER": {
+			handler:      registerHandler,
+			minParams:    3,
+			usablePreReg: true,
+		},
+
+		"REHASH": {
+			handler:   rehashHandler,
+			minParams: 0,
+			capabs:    []string{"rehash"},
+		},
+
+		"RELAYMSG": {
+			handler:   relaymsgHandler,
+			minParams: 3,
+		},
+		"RENAME": {
+			handler:   renameHandler,
+			minParams: 2,
+		},
+		"SAJOIN": {
+			handler:   sajoinHandler,
+			minParams: 1,
+			capabs:    []string{"sajoin"},
+		},
+		"SANICK": {
+			handler:   sanickHandler,
+			minParams: 2,
+			capabs:    []string{"samode"},
+		},
+		"SAMODE": {
+			handler:   modeHandler,
+			minParams: 1,
+			capabs:    []string{"samode"},
+		},
+		"SCENE": {
+			handler:   sceneHandler,
+			minParams: 2,
+		},
+		"SETNAME": {
+			handler:   setnameHandler,
+			minParams: 1,
+		},
+		"SUMMON": {
+			handler: summonHandler,
+		},
+		"TAGMSG": {
+			handler:   messageHandler,
+			minParams: 1,
+		},
+		"TIME": {
+			handler:   timeHandler,
+			minParams: 0,
+		},
+		"TOKEN": {
+			handler:      tokenHandler,
+			minParams:    1,
+			usablePreReg: true,
+		},
+		"TOPIC": {
+			handler:   topicHandler,
+			minParams: 1,
+		},
+		"UBAN": {
+			handler:   ubanHandler,
+			minParams: 1,
+			capabs:    []string{"ban"},
+		},
+		"UNDLINE": {
+			handler:   unDLineHandler,
+			minParams: 1,
+			capabs:    []string{"ban"},
+		},
+		"UNINVITE": {
+			handler:   inviteHandler,
+			minParams: 2,
+		},
+		"UNKLINE": {
+			handler:   unKLineHandler,
+			minParams: 1,
+			capabs:    []string{"ban"},
+		},
+		"USER": {
+			handler:      userHandler,
+			usablePreReg: true,
+			minParams:    4,
+		},
+		"USERHOST": {
+			handler:   userhostHandler,
+			minParams: 1,
+		},
+		"USERS": {
+			handler: usersHandler,
+		},
+		"VERIFY": {
+			handler:      verifyHandler,
+			usablePreReg: true,
+			minParams:    2,
+		},
+		"VERSION": {
+			handler:   versionHandler,
+			minParams: 0,
+		},
+		"WEBIRC": {
+			handler:      webircHandler,
+			usablePreReg: true,
+			minParams:    4,
+		},
+		"WEBPUSH": {
+			handler:   webpushHandler,
+			minParams: 2,
+		},
+		"WHO": {
+			handler:   whoHandler,
+			minParams: 1,
+		},
+		"WHOIS": {
+			handler:   whoisHandler,
+			minParams: 1,
+		},
+		"WHOWAS": {
+			handler:   whowasHandler,
+			minParams: 1,
+		},
+		"ZNC": {
+			handler:   zncHandler,
+			minParams: 1,
+		},
+	}
+
+	initializeServices()
+}

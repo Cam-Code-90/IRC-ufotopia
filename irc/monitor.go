@@ -1,0 +1,155 @@
+// Copyright (c) 2016-2017 Daniel Oaks <daniel@danieloaks.net>
+// released under the MIT license
+
+package irc
+
+import (
+	"sync"
+
+	"github.com/ergochat/ergo/irc/caps"
+	"github.com/ergochat/ergo/irc/utils"
+
+	"github.com/ergochat/irc-go/ircmsg"
+)
+
+// MonitorManager keeps track of who's monitoring which nicks.
+type MonitorManager struct {
+	sync.RWMutex // tier 2
+	// client -> (casefolded nick it's watching -> uncasefolded nick)
+	watching map[*Session]map[string]string
+	// casefolded nick -> clients watching it
+	watchedby map[string]utils.HashSet[*Session]
+}
+
+func (mm *MonitorManager) Initialize() {
+	mm.watching = make(map[*Session]map[string]string)
+	mm.watchedby = make(map[string]utils.HashSet[*Session])
+}
+
+// AddMonitors adds clients using extended-monitor monitoring `client`'s nick to the passed user set.
+func (manager *MonitorManager) AddMonitors(users utils.HashSet[*Session], cfnick string, capabs ...caps.Capability) {
+	// technically, we should check extended-monitor here, but it's not really necessary
+	// since clients will ignore AWAY, ACCOUNT, CHGHOST, and SETNAME for users
+	// they're not tracking
+
+	manager.RLock()
+	defer manager.RUnlock()
+	for session := range manager.watchedby[cfnick] {
+		if session.capabilities.HasAll(capabs...) {
+			users.Add(session)
+		}
+	}
+}
+
+// AlertAbout alerts everyone monitoring `client`'s nick that `client` is now {on,off}line.
+func (manager *MonitorManager) AlertAbout(nick, cfnick string, online bool, client *Client) {
+	var watchers []*Session
+	// safely copy the list of clients watching our nick
+	manager.RLock()
+	for session := range manager.watchedby[cfnick] {
+		watchers = append(watchers, session)
+	}
+	manager.RUnlock()
+
+	command := RPL_MONOFFLINE
+	if online {
+		command = RPL_MONONLINE
+	}
+
+	var metadata map[string]string
+	if online && client != nil {
+		metadata = client.ListMetadata()
+	}
+
+	for _, session := range watchers {
+		session.Send(nil, session.client.server.name, command, session.client.Nick(), nick)
+
+		if online && session.capabilities.Has(caps.Metadata) {
+			// even if there is no user metadata, or no subscriptions,
+			// we still need to send an empty metadata batch alongside RPL_MONONLINE
+			subs := session.MetadataSubscriptions()
+			rb := NewResponseBuffer(session)
+			batchID := rb.StartNestedBatch(nil, "metadata", nick)
+			for key := range subs {
+				if val, ok := metadata[key]; ok {
+					rb.Add(nil, client.server.name, RPL_KEYVALUE, "*", nick, key, "*", val)
+				}
+			}
+			rb.EndNestedBatch(batchID)
+			rb.Send(false)
+		}
+	}
+}
+
+// Add registers `client` to receive notifications about `nick`.
+func (manager *MonitorManager) Add(session *Session, nick string, limit int) error {
+	cfnick, err := CasefoldName(nick)
+	if err != nil {
+		return err
+	}
+
+	manager.Lock()
+	defer manager.Unlock()
+
+	if manager.watching[session] == nil {
+		manager.watching[session] = make(map[string]string)
+	}
+	if manager.watchedby[cfnick] == nil {
+		manager.watchedby[cfnick] = make(utils.HashSet[*Session])
+	}
+
+	if len(manager.watching[session]) >= limit {
+		return errMonitorLimitExceeded
+	}
+
+	manager.watching[session][cfnick] = nick
+	manager.watchedby[cfnick].Add(session)
+	return nil
+}
+
+// Remove unregisters `client` from receiving notifications about `nick`.
+func (manager *MonitorManager) Remove(session *Session, nick string) (err error) {
+	cfnick, err := CasefoldName(nick)
+	if err != nil {
+		return
+	}
+
+	manager.Lock()
+	defer manager.Unlock()
+	delete(manager.watching[session], cfnick)
+	manager.watchedby[cfnick].Remove(session)
+	return nil
+}
+
+// RemoveAll unregisters `client` from receiving notifications about *all* nicks.
+func (manager *MonitorManager) RemoveAll(session *Session) {
+	manager.Lock()
+	defer manager.Unlock()
+
+	for cfnick := range manager.watching[session] {
+		manager.watchedby[cfnick].Remove(session)
+	}
+	delete(manager.watching, session)
+}
+
+// List lists all nicks that `client` is registered to receive notifications about.
+func (manager *MonitorManager) List(session *Session) (nicks []string) {
+	manager.RLock()
+	defer manager.RUnlock()
+	watching := manager.watching[session]
+	nicks = make([]string, 0, len(watching))
+	for _, nick := range watching {
+		nicks = append(nicks, nick)
+	}
+	return nicks
+}
+
+var (
+	monitorSubcommands = map[string]func(server *Server, client *Client, msg ircmsg.Message, rb *ResponseBuffer) bool{
+		"-": monitorRemoveHandler,
+		"+": monitorAddHandler,
+		"c": monitorClearHandler,
+		"l": monitorListHandler,
+		"s": monitorStatusHandler,
+	}
+)

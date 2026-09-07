@@ -1,0 +1,36 @@
+name: "build"
+
+on:
+  pull_request:
+    branches:
+      - "master"
+      - "stable"
+  push:
+    branches:
+      - "master"
+      - "stable"
+
+jobs:
+  build:
+    runs-on: "ubuntu-24.04"
+    steps:
+      - name: "checkout repository"
+        uses: "actions/checkout@v6"
+      - name: "setup go"
+        uses: "actions/setup-go@v6"
+        with:
+          go-version: "1.27"
+      - name: "install python3-pytest"
+        run: "sudo apt install -y python3-pytest python3-websockets"
+      - name: "make minimal"
+        run: "make minimal"
+      - name: "make build"
+        run: "make build"
+      - name: "make install"
+        run: "make install"
+      - name: "make test"
+        run: "make test"
+      - name: "make smoke"
+        run: "make smoke"
+      - name: "make irctest"
+        run: "make irctest"
